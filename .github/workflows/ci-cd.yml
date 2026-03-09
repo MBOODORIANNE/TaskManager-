@@ -1,0 +1,195 @@
+name: TaskManager — CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  JAVA_VERSION: '17'
+  DOCKER_IMAGE: ${{ secrets.DOCKER_USERNAME }}/taskmanager-api
+
+jobs:
+  # ══════════════════════════════════════════════════════════════════
+  # ÉTAPE 1 : Build & Lint
+  # ══════════════════════════════════════════════════════════════════
+  build-and-lint:
+    name:  Build & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name:  Configurer JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Compiler & Lint (Checkstyle)
+        run: mvn clean compile checkstyle:check -B
+
+  # ══════════════════════════════════════════════════════════════════
+  # ÉTAPE 2 : Tests & Couverture
+  # ══════════════════════════════════════════════════════════════════
+  tests:
+    name:  Tests & Couverture
+    runs-on: ubuntu-latest
+    needs: build-and-lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name:  Configurer JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Lancer les tests
+        run: mvn test -B -Dspring.profiles.active=test
+
+      - name: Vérifier le seuil de couverture (≥ 70%)
+        run: mvn jacoco:check
+
+      - name:  Générer le rapport JaCoCo
+        run: mvn jacoco:report
+
+      - name: Publier les rapports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: target/site/jacoco/
+
+  # ══════════════════════════════════════════════════════════════════
+  # ÉTAPE 3 : Analyse SonarQube
+  # ══════════════════════════════════════════════════════════════════
+  sonar:
+    name: Analyse SonarQube
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name:  Analyser
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          mvn -B sonar:sonar \
+            -Dsonar.projectKey=taskmanager-api \
+            -Dsonar.host.url=$SONAR_HOST_URL \
+            -Dsonar.token=$SONAR_TOKEN \
+            -Dsonar.qualitygate.wait=true
+
+  # ══════════════════════════════════════════════════════════════════
+  # ÉTAPE 4 : DevSecOps Scans
+  # ══════════════════════════════════════════════════════════════════
+  security:
+    name: Security Scans
+    runs-on: ubuntu-latest
+    # Dépend de build-and-lint pour s'assurer que le code compile, 
+    # mais tourne en parallèle avec les tests
+    needs: build-and-lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Secret Detection (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configurer JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name:  Dependency Scan (OWASP)
+        run: mvn dependency-check:check -B
+
+  # ══════════════════════════════════════════════════════════════════
+  # ÉTAPE 5 : Build & Push Docker
+  # ══════════════════════════════════════════════════════════════════
+  docker:
+    name: Build & Push Docker
+    runs-on: ubuntu-latest
+    needs: [ sonar, security ]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name:  JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Package
+        run: mvn package -DskipTests -B
+
+      - name:  Login Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name:  Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Docker Image Scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE }}:${{ steps.meta.outputs.version }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+  # ══════════════════════════════════════════════════════════════════
+  # ÉTAPE 6 : Déploiement Automatique
+  # ══════════════════════════════════════════════════════════════════
+  deploy:
+    name: Deploy via Docker Compose
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name:  Simulation Déploiement docker-compose
+        run: |
+          echo "Déploiement en cours avec docker-compose..."
+          echo "Utilisation du fichier: docker-compose.yml"
+          # Simulation d'une commande SSH pour déployer
+          # ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "docker-compose pull && docker-compose up -d"
+          echo "Application mise à jour avec succès !"
