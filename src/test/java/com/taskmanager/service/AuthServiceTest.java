@@ -58,6 +58,16 @@ class AuthServiceTest {
     }
 
     @Test
+    void register_ShouldThrowException_WhenEmailAlreadyExists() {
+        RegisterRequest request = new RegisterRequest();
+        request.setEmail("existing@example.com");
+
+        when(userRepository.findByEmail("existing@example.com")).thenReturn(Optional.of(new User()));
+
+        assertThrows(RuntimeException.class, () -> authService.register(request));
+    }
+
+    @Test
     void login_ShouldReturnToken_WhenCredentialsAreValid() {
         LoginRequest request = new LoginRequest();
         request.setEmail("user@example.com");
@@ -73,5 +83,42 @@ class AuthServiceTest {
         assertNotNull(response);
         assertEquals("testToken", response.getToken());
         verify(authenticationManager, times(1)).authenticate(any(UsernamePasswordAuthenticationToken.class));
+    }
+
+    @Test
+    void login_ShouldThrowException_WhenUserNotFound() {
+        LoginRequest request = new LoginRequest();
+        request.setEmail("notfound@example.com");
+
+        when(userRepository.findByEmail("notfound@example.com")).thenReturn(Optional.empty());
+
+        assertThrows(org.springframework.security.core.userdetails.UsernameNotFoundException.class,
+                () -> authService.login(request));
+    }
+
+    @Test
+    void loadUserByUsername_ShouldReturnUserDetails_WhenUserExists() {
+        User user = User.builder()
+                .email("user@example.com")
+                .password("encodedPassword")
+                .role("ROLE_USER")
+                .build();
+
+        when(userRepository.findByEmail("user@example.com")).thenReturn(Optional.of(user));
+
+        org.springframework.security.core.userdetails.UserDetails userDetails = authService
+                .loadUserByUsername("user@example.com");
+
+        assertNotNull(userDetails);
+        assertEquals(user.getEmail(), userDetails.getUsername());
+        assertEquals(user.getPassword(), userDetails.getPassword());
+    }
+
+    @Test
+    void loadUserByUsername_ShouldThrowException_WhenUserDoesNotExist() {
+        when(userRepository.findByEmail("notfound@example.com")).thenReturn(Optional.empty());
+
+        assertThrows(org.springframework.security.core.userdetails.UsernameNotFoundException.class,
+                () -> authService.loadUserByUsername("notfound@example.com"));
     }
 }

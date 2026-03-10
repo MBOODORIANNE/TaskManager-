@@ -78,8 +78,52 @@ class TaskServiceTest {
     @Test
     void getTaskById_ShouldThrowException_WhenNotFound() {
         when(userRepository.findByEmail("user@example.com")).thenReturn(Optional.of(user));
-        when(taskRepository.findById(1L)).thenReturn(Optional.ofNullable(null));
+        when(taskRepository.findById(1L)).thenReturn(Optional.empty());
 
         assertThrows(ResourceNotFoundException.class, () -> taskService.getTaskById(1L));
+    }
+
+    @Test
+    void getTaskById_ShouldThrowException_WhenNotOwner() {
+        User otherUser = User.builder().id(2L).email("other@example.com").build();
+        Task otherTask = Task.builder().id(2L).user(otherUser).build();
+
+        when(userRepository.findByEmail("user@example.com")).thenReturn(Optional.of(user));
+        when(taskRepository.findById(2L)).thenReturn(Optional.of(otherTask));
+
+        assertThrows(com.taskmanager.exception.UnauthorizedException.class, () -> taskService.getTaskById(2L));
+    }
+
+    @Test
+    void getAuthenticatedUser_ShouldThrowException_WhenUserNotFound() {
+        when(userRepository.findByEmail("user@example.com")).thenReturn(Optional.empty());
+
+        assertThrows(org.springframework.security.core.userdetails.UsernameNotFoundException.class,
+                () -> taskService.getAllTasks(org.springframework.data.domain.Pageable.unpaged()));
+    }
+
+    @Test
+    void updateTask_ShouldReturnUpdatedTask() {
+        TaskRequest request = new TaskRequest();
+        request.setTitle("Updated Title");
+
+        when(userRepository.findByEmail("user@example.com")).thenReturn(Optional.of(user));
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+        when(taskRepository.save(any(Task.class))).thenReturn(task);
+
+        Task updated = taskService.updateTask(1L, request);
+
+        assertNotNull(updated);
+        assertEquals("Updated Title", updated.getTitle());
+    }
+
+    @Test
+    void deleteTask_ShouldCallDelete() {
+        when(userRepository.findByEmail("user@example.com")).thenReturn(Optional.of(user));
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+
+        taskService.deleteTask(1L);
+
+        verify(taskRepository, times(1)).delete(task);
     }
 }
